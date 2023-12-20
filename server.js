@@ -2,16 +2,164 @@ const express = require('express');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const cors = require('cors');
-const jwt = require('jsonwebtoken');  // Aggiunta
-const dotenv = require('dotenv');  // Aggiunta
+const jwt = require('jsonwebtoken');
+const dotenv = require('dotenv');
 const path = require('path');
-dotenv.config();  // Aggiunta
+const multer = require('multer');
+const fs = require("fs")
+const fsp = require('fs/promises'); 
+const { google } = require('googleapis');
+
+const filePath = path.join(__dirname, 'uploads', 'audio.wav');
+dotenv.config();
+
+
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
 mongoose.connect('mongodb+srv://adminleo:lFFL9PLkKrNAdXNS@resapp.0tdhejh.mongodb.net/', { useNewUrlParser: true, useUnifiedTopology: true });
+
+// Assicurati che la cartella 'uploads' esista
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)){
+    fs.mkdirSync(uploadsDir);
+}
+
+// Configurazione di Multer
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadsDir);
+    },
+    filename: (req, file, cb) => {
+        cb(null, file.originalname);
+    },
+
+});
+const upload = multer({
+    storage: storage,
+    limits: {
+        fileSize: 500 * 1024 * 1024, // per i file
+        fieldSize: 1 * 1024 * 1024  // per i campi di testo
+    }
+});
+const keyFile = require('./credentials.json');
+const drive = google.drive({
+    version: 'v3',
+    auth: new google.auth.GoogleAuth({
+      credentials: keyFile,
+      scopes: ['https://www.googleapis.com/auth/drive'],
+    }),
+  });
+
+// Rotta per l'upload del file
+app.post('/upload', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).send('Nessun file caricato.');
+        }
+
+        const filePath = path.join(__dirname, 'uploads', req.file.originalname);
+
+        // Controllo dell'esistenza del file e della sua dimensione
+        try {
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Breve attesa per la disponibilità del file
+            await fsp.access(filePath, fs.constants.F_OK); // Controlla se il file esiste
+            const stats = await fsp.stat(filePath); // Ottiene le statistiche del file
+            if (stats.size === 0) {
+                throw new Error("Il file non è stato completamente scritto su disco.");
+            }
+        } catch (error) {
+            console.error('Errore durante la lettura del file:', error);
+            return res.status(500).send('Errore durante il caricamento del file.');
+        }
+
+        // Procedi con il caricamento del file su Google Drive
+        const folderId = req.body.folderId;
+        if (!folderId) {
+            return res.status(400).send('ID della cartella non fornito.');
+        }
+
+        const fileMetadata = {
+            name: req.file.originalname,
+            parents: [folderId],
+        };
+
+        const media = {
+            mimeType: req.file.mimetype,
+            body: fs.createReadStream(filePath),
+        };
+
+        const driveResponse = await drive.files.create({
+            requestBody: fileMetadata,
+            media: media,
+        });
+
+        // Opzionale: Elimina il file dal server dopo il caricamento
+        //await fsp.unlink(filePath);
+
+        res.status(200).json({ fileId: driveResponse.data.id });
+    } catch (error) {
+        console.error('Errore generale:', error);
+        res.status(500).send('Errore durante il caricamento del file.');
+    }
+});
+// Gestione degli errori nella pipeline di Express
+app.use((error, req, res, next) => {
+    if (error) {
+        console.error('Errore nella pipeline di Express:', error);
+        return res.status(500).send({ error: error.message });
+    }
+    next();
+});
+
+
+
+app.get('/download/:folderId', async (req, res) => {
+    try {
+        const folderId = req.params.folderId;
+
+        // Qui dovresti avere la logica per autenticarti con Google Drive
+        // e ottenere l'elenco dei file nella cartella specificata
+        // Assumiamo che tu stia usando il client Google Drive API
+        const fileList = await drive.files.list({
+            q: `'${folderId}' in parents`,
+            // fields: 'files(id, name, mimeType)', // Aggiungi i campi che ti servono
+        });
+
+        // Assicurati che ci sia almeno un file nella cartella
+        if (fileList.data.files.length === 0) {
+            return res.status(404).send('Nessun file trovato nella cartella.');
+        }
+
+        // Prendi il primo file dalla lista (o applica la tua logica per selezionare un file)
+        const file = fileList.data.files[0];
+
+        // Scarica il file
+        const driveResponse = await drive.files.get({
+            fileId: file.id,
+            alt: 'media',
+            // headers: { Authorization: `Bearer YOUR_ACCESS_TOKEN` }
+        }, { responseType: 'stream' });
+
+        // Imposta gli header per il download
+        res.setHeader('Content-Disposition', `attachment; filename=${file.name}`);
+        res.setHeader('Content-Type', 'application/octet-stream');
+
+        // Invia il file al client
+        driveResponse.data.pipe(res);
+    } catch (error) {
+        console.error('Errore nel download:', error);
+        res.status(500).send('Errore durante il download del file.');
+    }
+});
+
+
+ 
+
+
+
 
 const UserSchema = new mongoose.Schema({
     name: String,
